@@ -575,10 +575,22 @@ def require_google_service(
             )
 
             # Extract user_google_email based on OAuth mode
+            # MULTI-ACCOUNT FIX: Check if user_google_email was explicitly provided
+            # If so, honor the explicit request instead of using session's authenticated user
+            explicit_user_email = kwargs.get("user_google_email")
+
             if is_oauth21_enabled():
-                user_google_email = _extract_oauth21_user_email(
-                    authenticated_user, func.__name__
-                )
+                if explicit_user_email:
+                    # Honor explicitly provided user_google_email for multi-account support
+                    logger.debug(
+                        f"[{func.__name__}] Multi-account: Using explicit user_google_email '{explicit_user_email}' "
+                        f"instead of session user '{authenticated_user}'"
+                    )
+                    user_google_email = explicit_user_email
+                else:
+                    user_google_email = _extract_oauth21_user_email(
+                        authenticated_user, func.__name__
+                    )
             else:
                 user_google_email = _extract_oauth20_user_email(
                     args, kwargs, wrapper_sig
@@ -714,10 +726,21 @@ def require_multiple_services(service_configs: List[Dict[str, Any]]):
             authenticated_user, _, mcp_session_id = _get_auth_context(tool_name)
 
             # Extract user_google_email based on OAuth mode
+            # MULTI-ACCOUNT FIX: Check if user_google_email was explicitly provided
+            explicit_user_email = kwargs.get("user_google_email")
+
             if is_oauth21_enabled():
-                user_google_email = _extract_oauth21_user_email(
-                    authenticated_user, tool_name
-                )
+                if explicit_user_email:
+                    # Honor explicitly provided user_google_email for multi-account support
+                    logger.debug(
+                        f"[{tool_name}] Multi-account: Using explicit user_google_email '{explicit_user_email}' "
+                        f"instead of session user '{authenticated_user}'"
+                    )
+                    user_google_email = explicit_user_email
+                else:
+                    user_google_email = _extract_oauth21_user_email(
+                        authenticated_user, tool_name
+                    )
             else:
                 user_google_email = _extract_oauth20_user_email(
                     args, kwargs, wrapper_sig

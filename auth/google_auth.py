@@ -680,10 +680,28 @@ def get_credentials(
         )
 
         if session_id:
-            credentials = load_credentials_from_session(session_id)
-            if credentials:
+            # MULTI-ACCOUNT FIX: Only use session credentials if they match the requested user
+            # Check who the session is bound to before loading credentials
+            session_bound_user = None
+            try:
+                store = get_oauth21_session_store()
+                session_bound_user = store.get_user_by_mcp_session(session_id)
+            except Exception as e:
+                logger.debug(f"[get_credentials] Could not check session binding: {e}")
+
+            # Only load from session if:
+            # 1. No specific user was requested (user_google_email is None), OR
+            # 2. The session is bound to the requested user
+            if not user_google_email or session_bound_user == user_google_email:
+                credentials = load_credentials_from_session(session_id)
+                if credentials:
+                    logger.debug(
+                        f"[get_credentials] Loaded credentials from session for session_id '{session_id}'."
+                    )
+            elif session_bound_user:
                 logger.debug(
-                    f"[get_credentials] Loaded credentials from session for session_id '{session_id}'."
+                    f"[get_credentials] Skipping session credentials: session bound to '{session_bound_user}' "
+                    f"but requested user is '{user_google_email}'"
                 )
 
         if not credentials and user_google_email:
