@@ -546,21 +546,23 @@ def get_credentials(
     """
     # PRIORITY 1: If user_google_email is specified, always try to get credentials for that user first
     # This ensures multi-account support works correctly in streamable-http mode
+    credentials = None
     if user_google_email:
+        # First try in-memory OAuth21SessionStore
         try:
             store = get_oauth21_session_store()
             # Try to get credentials directly for the requested user email
             credentials = store.get_credentials(user_google_email)
             if credentials:
                 logger.info(
-                    f"[get_credentials] Found credentials for requested user {user_google_email}"
+                    f"[get_credentials] Found credentials in memory for {user_google_email}"
                 )
                 # Check scopes
                 if not all(scope in credentials.scopes for scope in required_scopes):
                     logger.warning(
                         f"[get_credentials] Credentials for {user_google_email} lack required scopes. Need: {required_scopes}, Have: {credentials.scopes}"
                     )
-                    # Don't return None yet - fall through to try file-based credentials
+                    credentials = None  # Reset so we fall through to file-based lookup
                 else:
                     # Return if valid
                     if credentials.valid:
@@ -584,11 +586,79 @@ def get_credentials(
                             return credentials
                         except Exception as e:
                             logger.error(
-                                f"[get_credentials] Failed to refresh credentials for {user_google_email}: {e}"
+                                f"[get_credentials] Failed to refresh in-memory credentials for {user_google_email}: {e}"
                             )
-                            # Fall through to try file-based credentials
+                            credentials = None  # Reset so we fall through to file-based lookup
         except Exception as e:
             logger.debug(f"[get_credentials] Error checking OAuth 2.1 store for {user_google_email}: {e}")
+
+        # If not found in memory, try file-based credential store
+        if not credentials and not is_stateless_mode():
+            logger.debug(
+                f"[get_credentials] No in-memory credentials for {user_google_email}, checking file store"
+            )
+            file_store = get_credential_store()
+            credentials = file_store.get_credential(user_google_email)
+            if credentials:
+                logger.info(
+                    f"[get_credentials] Found credentials in file store for {user_google_email}"
+                )
+                # Check scopes
+                if not all(scope in credentials.scopes for scope in required_scopes):
+                    logger.warning(
+                        f"[get_credentials] File credentials for {user_google_email} lack required scopes. Need: {required_scopes}, Have: {credentials.scopes}"
+                    )
+                    credentials = None
+                elif credentials.valid:
+                    # Cache to in-memory store for future lookups
+                    try:
+                        store = get_oauth21_session_store()
+                        store.store_session(
+                            user_email=user_google_email,
+                            access_token=credentials.token,
+                            refresh_token=credentials.refresh_token,
+                            token_uri=credentials.token_uri,
+                            client_id=credentials.client_id,
+                            client_secret=credentials.client_secret,
+                            scopes=credentials.scopes,
+                            expiry=credentials.expiry,
+                            mcp_session_id=session_id,
+                        )
+                        logger.debug(f"[get_credentials] Cached file credentials to memory for {user_google_email}")
+                    except Exception as e:
+                        logger.debug(f"[get_credentials] Could not cache to memory store: {e}")
+                    return credentials
+                elif credentials.expired and credentials.refresh_token:
+                    # Try to refresh file-based credentials
+                    try:
+                        credentials.refresh(Request())
+                        logger.info(
+                            f"[get_credentials] Refreshed file-based credentials for {user_google_email}"
+                        )
+                        # Save refreshed credentials to file
+                        file_store.store_credential(user_google_email, credentials)
+                        # Also cache to in-memory store
+                        try:
+                            store = get_oauth21_session_store()
+                            store.store_session(
+                                user_email=user_google_email,
+                                access_token=credentials.token,
+                                refresh_token=credentials.refresh_token,
+                                token_uri=credentials.token_uri,
+                                client_id=credentials.client_id,
+                                client_secret=credentials.client_secret,
+                                scopes=credentials.scopes,
+                                expiry=credentials.expiry,
+                                mcp_session_id=session_id,
+                            )
+                        except Exception as e:
+                            logger.debug(f"[get_credentials] Could not cache refreshed credentials to memory: {e}")
+                        return credentials
+                    except Exception as e:
+                        logger.error(
+                            f"[get_credentials] Failed to refresh file-based credentials for {user_google_email}: {e}"
+                        )
+                        credentials = None
 
     # PRIORITY 2: Only use session-based lookup if no user_google_email was specified
     # This is the fallback for single-user scenarios
