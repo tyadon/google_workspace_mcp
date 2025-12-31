@@ -341,20 +341,37 @@ class OAuth21SessionStore:
 
             # Store MCP session mapping if provided
             if mcp_session_id:
-                # Create immutable session binding (first binding wins, cannot be changed)
-                if mcp_session_id not in self._session_auth_binding:
-                    self._session_auth_binding[mcp_session_id] = user_email
-                    logger.info(
-                        f"Created immutable session binding: {mcp_session_id} -> {user_email}"
-                    )
-                elif self._session_auth_binding[mcp_session_id] != user_email:
-                    # Security: Attempt to bind session to different user
-                    logger.error(
-                        f"SECURITY: Attempt to rebind session {mcp_session_id} from {self._session_auth_binding[mcp_session_id]} to {user_email}"
-                    )
-                    raise ValueError(
-                        f"Session {mcp_session_id} is already bound to a different user"
-                    )
+                # Check transport mode to determine binding behavior
+                # In stdio mode, we allow multi-account access from a single session
+                # because there's only one user (the local user) with multiple Google accounts
+                skip_binding_check = False
+                try:
+                    from core.config import get_transport_mode
+                    transport_mode = get_transport_mode()
+                    if transport_mode == "stdio":
+                        skip_binding_check = True
+                        logger.debug(
+                            f"Stdio mode: allowing multi-account session for {user_email}"
+                        )
+                except Exception as e:
+                    logger.debug(f"Could not check transport mode: {e}")
+
+                if not skip_binding_check:
+                    # Create immutable session binding (first binding wins, cannot be changed)
+                    # This is only enforced in OAuth 2.1 HTTP mode where different users connect
+                    if mcp_session_id not in self._session_auth_binding:
+                        self._session_auth_binding[mcp_session_id] = user_email
+                        logger.info(
+                            f"Created immutable session binding: {mcp_session_id} -> {user_email}"
+                        )
+                    elif self._session_auth_binding[mcp_session_id] != user_email:
+                        # Security: Attempt to bind session to different user
+                        logger.error(
+                            f"SECURITY: Attempt to rebind session {mcp_session_id} from {self._session_auth_binding[mcp_session_id]} to {user_email}"
+                        )
+                        raise ValueError(
+                            f"Session {mcp_session_id} is already bound to a different user"
+                        )
 
                 self._mcp_session_mapping[mcp_session_id] = user_email
                 logger.info(
@@ -439,6 +456,9 @@ class OAuth21SessionStore:
         This method ensures that a session can only access credentials for its
         authenticated user, preventing cross-account access.
 
+        In stdio mode, session binding checks are skipped because there's only
+        one local user who may have multiple Google accounts.
+
         Args:
             requested_user_email: The email of the user whose credentials are requested
             session_id: The current session ID (MCP or OAuth session)
@@ -448,6 +468,24 @@ class OAuth21SessionStore:
             Google Credentials object if validation passes, None otherwise
         """
         with self._lock:
+            # Check if we're in stdio mode - skip binding checks for multi-account support
+            is_stdio_mode = False
+            try:
+                from core.config import get_transport_mode
+                transport_mode = get_transport_mode()
+                if transport_mode == "stdio":
+                    is_stdio_mode = True
+            except Exception:
+                pass
+
+            # In stdio mode, directly return credentials for the requested user
+            # No session binding checks needed - there's only one local user
+            if is_stdio_mode and requested_user_email in self._sessions:
+                logger.debug(
+                    f"Stdio mode: returning credentials for {requested_user_email} (multi-account)"
+                )
+                return self.get_credentials(requested_user_email)
+
             # Priority 1: Check auth token email (most secure, from verified JWT)
             if auth_token_email:
                 if auth_token_email != requested_user_email:
@@ -459,7 +497,7 @@ class OAuth21SessionStore:
                 # Token email matches, allow access
                 return self.get_credentials(requested_user_email)
 
-            # Priority 2: Check session binding
+            # Priority 2: Check session binding (only in non-stdio modes)
             if session_id:
                 bound_user = self._session_auth_binding.get(session_id)
                 if bound_user:
